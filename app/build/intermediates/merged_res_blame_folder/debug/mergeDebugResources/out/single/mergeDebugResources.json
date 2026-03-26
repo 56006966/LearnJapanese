@@ -1,0 +1,10 @@
+[
+    {
+        "merged": "com.example.learnjapanese.app-debug-70:/xml_data_extraction_rules.xml.flat",
+        "source": "com.example.learnjapanese.app-main-72:/xml/data_extraction_rules.xml"
+    },
+    {
+        "merged": "com.example.learnjapanese.app-debug-70:/xml_backup_rules.xml.flat",
+        "source": "com.example.learnjapanese.app-main-72:/xml/backup_rules.xml"
+    }
+]
