@@ -76,14 +76,18 @@ import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.learnjapanese.data.AppLevel
+import com.example.learnjapanese.data.AppProgressRepository
+import com.example.learnjapanese.data.ThemeMode
 import com.example.learnjapanese.data.CurriculumRepository
 import com.example.learnjapanese.data.PhraseCard
 import com.example.learnjapanese.data.StrokeGuide
@@ -109,12 +113,21 @@ private data class BuddySuggestion(
 )
 
 @Composable
-fun LearnJapaneseApp() {
+fun LearnJapaneseApp(
+    themeMode: ThemeMode,
+    onCycleTheme: () -> Unit
+) {
     val context = LocalContext.current
     val tabs = LearnTab.entries
     val levels = CurriculumRepository.levels
-    var selectedTab by rememberSaveable { mutableIntStateOf(0) }
-    var selectedLevel by rememberSaveable { mutableIntStateOf(CurriculumRepository.firstAvailableLevel()) }
+    val initialProgress = remember {
+        AppProgressRepository.load(
+            context = context,
+            defaultLevel = CurriculumRepository.firstAvailableLevel()
+        )
+    }
+    var selectedTab by rememberSaveable { mutableIntStateOf(initialProgress.selectedTabIndex.coerceIn(0, tabs.lastIndex)) }
+    var selectedLevel by rememberSaveable { mutableIntStateOf(initialProgress.selectedLevel) }
     val currentLevel = levels.first { it.number == selectedLevel }
     val deck = CurriculumRepository.deckForLevel(selectedLevel)
     val traceLessons = TraceLessonRepository.starterLessons
@@ -144,6 +157,12 @@ fun LearnJapaneseApp() {
             label = deck.firstOrNull()?.english ?: "current card"
         )
     }
+    LaunchedEffect(selectedTab) {
+        AppProgressRepository.saveSelectedTab(context, selectedTab)
+    }
+    LaunchedEffect(selectedLevel) {
+        AppProgressRepository.saveSelectedLevel(context, selectedLevel)
+    }
 
     Scaffold { padding ->
         BoxWithConstraints(
@@ -170,6 +189,8 @@ fun LearnJapaneseApp() {
                     level = currentLevel,
                     profile = userProfile!!,
                     buddyVisible = buddyVisible,
+                    themeMode = themeMode,
+                    onCycleTheme = onCycleTheme,
                     onEditProfile = { editingProfile = true },
                     onToggleBuddy = { buddyVisible = !buddyVisible }
                 )
@@ -214,6 +235,7 @@ fun LearnJapaneseApp() {
                     LearnTab.Tracing -> TracingLessonScreen(
                         profile = userProfile!!,
                         lessons = traceLessons,
+                        initialLessonIndex = initialProgress.selectedTracingLessonIndex.coerceIn(0, traceLessons.lastIndex),
                         onFocusLesson = { buddySuggestion = BuddySuggestion(it.character, it.meaning) }
                     )
                 }
@@ -248,6 +270,8 @@ private fun HeroHeader(
     level: AppLevel,
     profile: UserProfile,
     buddyVisible: Boolean,
+    themeMode: ThemeMode,
+    onCycleTheme: () -> Unit,
     onEditProfile: () -> Unit,
     onToggleBuddy: () -> Unit
 ) {
@@ -284,12 +308,21 @@ private fun HeroHeader(
                 )
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(
-                    text = "Welcome back, ${profile.kanjiName} (${profile.kanjiMeaning})",
+                    text = "Welcome back, ${profile.kanjiName}",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onPrimary
                 )
             }
             Row {
+                Button(onClick = onCycleTheme) {
+                    Text(
+                        when (themeMode) {
+                            ThemeMode.SYSTEM -> "System"
+                            ThemeMode.LIGHT -> "Light"
+                            ThemeMode.DARK -> "Dark"
+                        }
+                    )
+                }
                 IconButton(onClick = onEditProfile) {
                     Icon(
                         imageVector = Icons.Filled.Edit,
@@ -700,13 +733,16 @@ private fun DictationPracticeScreen(
 private fun TracingLessonScreen(
     profile: UserProfile,
     lessons: List<TraceLesson>,
+    initialLessonIndex: Int,
     onFocusLesson: (TraceLesson) -> Unit
 ) {
-    var selectedIndex by rememberSaveable { mutableIntStateOf(0) }
+    val context = LocalContext.current
+    var selectedIndex by rememberSaveable { mutableIntStateOf(initialLessonIndex.coerceIn(0, lessons.lastIndex)) }
     val lesson = lessons[selectedIndex]
 
     LaunchedEffect(selectedIndex) {
         onFocusLesson(lesson)
+        AppProgressRepository.saveSelectedTracingLessonIndex(context, selectedIndex)
     }
 
     LazyColumn(
@@ -815,6 +851,8 @@ private fun TracingCanvas(
 ) {
     val strokes = remember(character) { mutableStateListOf<List<Offset>>() }
     val currentStroke = remember(character) { mutableStateListOf<Offset>() }
+    var canvasSize by remember(character) { mutableStateOf(IntSize.Zero) }
+    var accuracyMessage by remember(character) { mutableStateOf("Trace over the faded guide, then tap Check accuracy.") }
     val primaryColor = MaterialTheme.colorScheme.primary
     val secondaryColor = MaterialTheme.colorScheme.secondary
     val guideColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)
@@ -827,7 +865,8 @@ private fun TracingCanvas(
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(320.dp)
+                    .height(380.dp)
+                    .onSizeChanged { canvasSize = it }
                     .clip(RoundedCornerShape(24.dp))
                     .background(Color(0xFFF7F2EB))
             ) {
@@ -857,10 +896,10 @@ private fun TracingCanvas(
                         canvas.nativeCanvas.drawText(
                             character,
                             size.width / 2f,
-                            size.height / 2f + 48f,
+                            size.height / 2f + 64f,
                             android.graphics.Paint().apply {
                                 textAlign = android.graphics.Paint.Align.CENTER
-                                textSize = 180f
+                                textSize = 220f
                                 color = android.graphics.Color.argb(40, 80, 80, 80)
                             }
                         )
@@ -923,17 +962,93 @@ private fun TracingCanvas(
                 Button(onClick = {
                     strokes.clear()
                     currentStroke.clear()
+                    accuracyMessage = "Trace over the faded guide, then tap Check accuracy."
                 }) {
                     Text("Clear")
                 }
-                Text(
-                    text = "Trace over the faded guide to build muscle memory.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+                Button(onClick = {
+                    accuracyMessage = scoreTracing(
+                        strokes = strokes,
+                        guides = guides,
+                        canvasWidth = canvasSize.width.toFloat(),
+                        canvasHeight = canvasSize.height.toFloat()
+                    )
+                }) {
+                    Text("Check accuracy")
+                }
             }
+            Spacer(modifier = Modifier.height(12.dp))
+            Text(
+                text = accuracyMessage,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = "Trace over the faded guide to build muscle memory.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
     }
+}
+
+private fun scoreTracing(
+    strokes: List<List<Offset>>,
+    guides: List<StrokeGuide>,
+    canvasWidth: Float,
+    canvasHeight: Float
+): String {
+    if (strokes.isEmpty()) {
+        return "Draw a few strokes first."
+    }
+    if (canvasWidth <= 0f || canvasHeight <= 0f) {
+        return "Try tracing again before checking accuracy."
+    }
+
+    val strokePenalty = kotlin.math.abs(strokes.size - guides.size) * 8
+    var distanceTotal = 0f
+    var pointCount = 0
+
+    strokes.forEach { stroke ->
+        stroke.forEach { point ->
+            val nearest = guides.minOfOrNull { guide ->
+                distanceToSegment(point, guide, canvasWidth, canvasHeight)
+            } ?: 100f
+            distanceTotal += nearest
+            pointCount++
+        }
+    }
+
+    val averageDistance = if (pointCount == 0) 100f else distanceTotal / pointCount
+    val distancePenalty = (averageDistance / 3.5f).coerceAtMost(60f)
+    val score = (100f - strokePenalty - distancePenalty).coerceIn(0f, 100f).roundToInt()
+
+    return when {
+        score >= 85 -> "Accuracy: $score%. Strong tracing."
+        score >= 65 -> "Accuracy: $score%. Pretty close. Try tightening the stroke path."
+        else -> "Accuracy: $score%. Try following the numbered guide lines more closely."
+    }
+}
+
+private fun distanceToSegment(
+    point: Offset,
+    guide: StrokeGuide,
+    canvasWidth: Float,
+    canvasHeight: Float
+): Float {
+    val start = Offset(guide.startX * canvasWidth, guide.startY * canvasHeight)
+    val end = Offset(guide.endX * canvasWidth, guide.endY * canvasHeight)
+    val dx = end.x - start.x
+    val dy = end.y - start.y
+    if (dx == 0f && dy == 0f) {
+        return kotlin.math.hypot((point.x - start.x).toDouble(), (point.y - start.y).toDouble()).toFloat()
+    }
+    val t = (((point.x - start.x) * dx) + ((point.y - start.y) * dy)) / ((dx * dx) + (dy * dy))
+    val clamped = t.coerceIn(0f, 1f)
+    val projectionX = start.x + clamped * dx
+    val projectionY = start.y + clamped * dy
+    return kotlin.math.hypot((point.x - projectionX).toDouble(), (point.y - projectionY).toDouble()).toFloat()
 }
 
 @Composable
