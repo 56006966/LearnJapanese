@@ -7,6 +7,7 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -33,6 +34,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.Button
@@ -65,7 +67,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -77,6 +86,11 @@ import androidx.compose.ui.unit.sp
 import com.example.learnjapanese.data.AppLevel
 import com.example.learnjapanese.data.CurriculumRepository
 import com.example.learnjapanese.data.PhraseCard
+import com.example.learnjapanese.data.StrokeGuide
+import com.example.learnjapanese.data.TraceLesson
+import com.example.learnjapanese.data.TraceLessonRepository
+import com.example.learnjapanese.data.UserProfile
+import com.example.learnjapanese.data.UserProfileRepository
 import com.example.learnjapanese.data.WikiLookupResult
 import com.example.learnjapanese.data.WikiLookupService
 import java.util.Locale
@@ -85,7 +99,8 @@ import kotlin.math.roundToInt
 
 private enum class LearnTab(val title: String) {
     Flashcards("Flashcards"),
-    Practice("Practice")
+    Practice("Practice"),
+    Tracing("Tracing")
 }
 
 private data class BuddySuggestion(
@@ -95,13 +110,17 @@ private data class BuddySuggestion(
 
 @Composable
 fun LearnJapaneseApp() {
+    val context = LocalContext.current
     val tabs = LearnTab.entries
     val levels = CurriculumRepository.levels
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
     var selectedLevel by rememberSaveable { mutableIntStateOf(CurriculumRepository.firstAvailableLevel()) }
     val currentLevel = levels.first { it.number == selectedLevel }
     val deck = CurriculumRepository.deckForLevel(selectedLevel)
+    val traceLessons = TraceLessonRepository.starterLessons
     var buddyVisible by rememberSaveable { mutableStateOf(true) }
+    var userProfile by remember { mutableStateOf(UserProfileRepository.load(context)) }
+    var editingProfile by rememberSaveable { mutableStateOf(false) }
     
     val buddySuggestionState = rememberSaveable(
         selectedLevel,
@@ -134,13 +153,38 @@ fun LearnJapaneseApp() {
                 .padding(padding)
         )
         {
+            if (userProfile == null) {
+                FirstLaunchOnboarding(
+                    onComplete = { englishName ->
+                        val profile = UserProfileRepository.generateKanjiProfile(englishName)
+                        UserProfileRepository.save(context, profile)
+                        userProfile = profile
+                    }
+                )
+                return@BoxWithConstraints
+            }
+
             val constraintsScope = this
             Column(modifier = Modifier.fillMaxSize()) {
                 HeroHeader(
                     level = currentLevel,
+                    profile = userProfile!!,
                     buddyVisible = buddyVisible,
+                    onEditProfile = { editingProfile = true },
                     onToggleBuddy = { buddyVisible = !buddyVisible }
                 )
+                if (editingProfile) {
+                    ProfileEditorCard(
+                        profile = userProfile!!,
+                        onSave = { englishName ->
+                            val profile = UserProfileRepository.generateKanjiProfile(englishName)
+                            UserProfileRepository.save(context, profile)
+                            userProfile = profile
+                            editingProfile = false
+                        },
+                        onCancel = { editingProfile = false }
+                    )
+                }
                 LevelPicker(
                     levels = levels,
                     selectedLevel = selectedLevel,
@@ -167,12 +211,18 @@ fun LearnJapaneseApp() {
                         level = currentLevel,
                         onFocusCard = { buddySuggestion = BuddySuggestion(it.japanese, it.english) }
                     )
+                    LearnTab.Tracing -> TracingLessonScreen(
+                        profile = userProfile!!,
+                        lessons = traceLessons,
+                        onFocusLesson = { buddySuggestion = BuddySuggestion(it.character, it.meaning) }
+                    )
                 }
             }
 
             if (deck.isNotEmpty()) {
                 if (buddyVisible) {
                     DraggableWikiBuddy(
+                        profile = userProfile!!,
                         suggestedQuery = buddySuggestion.query,
                         suggestedLabel = buddySuggestion.label,
                         containerWidthDp = constraintsScope.maxWidth.value,
@@ -181,6 +231,7 @@ fun LearnJapaneseApp() {
                     )
                 } else {
                     MiniWikiBuddy(
+                        kanjiName = userProfile!!.kanjiName,
                         onExpand = { buddyVisible = true },
                         modifier = Modifier
                             .align(Alignment.BottomEnd)
@@ -195,7 +246,9 @@ fun LearnJapaneseApp() {
 @Composable
 private fun HeroHeader(
     level: AppLevel,
+    profile: UserProfile,
     buddyVisible: Boolean,
+    onEditProfile: () -> Unit,
     onToggleBuddy: () -> Unit
 ) {
     Column(
@@ -229,14 +282,144 @@ private fun HeroHeader(
                     style = MaterialTheme.typography.bodyLarge,
                     color = MaterialTheme.colorScheme.onPrimary
                 )
-            }
-            IconButton(onClick = onToggleBuddy) {
-                Icon(
-                    imageVector = if (buddyVisible) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
-                    contentDescription = if (buddyVisible) "Hide helper" else "Show helper",
-                    tint = MaterialTheme.colorScheme.onPrimary
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = "Welcome back, ${profile.kanjiName} (${profile.kanjiMeaning})",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onPrimary
                 )
             }
+            Row {
+                IconButton(onClick = onEditProfile) {
+                    Icon(
+                        imageVector = Icons.Filled.Edit,
+                        contentDescription = "Edit kanji name",
+                        tint = MaterialTheme.colorScheme.onPrimary
+                    )
+                }
+                IconButton(onClick = onToggleBuddy) {
+                    Icon(
+                        imageVector = if (buddyVisible) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                        contentDescription = if (buddyVisible) "Hide helper" else "Show helper",
+                        tint = MaterialTheme.colorScheme.onPrimary
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ProfileEditorCard(
+    profile: UserProfile,
+    onSave: (String) -> Unit,
+    onCancel: () -> Unit
+) {
+    var englishName by rememberSaveable(profile.englishName) { mutableStateOf(profile.englishName) }
+    val preview = remember(englishName) {
+        UserProfileRepository.generateKanjiProfile(englishName.ifBlank { "Friend" })
+    }
+
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        shape = RoundedCornerShape(24.dp),
+        color = MaterialTheme.colorScheme.surface
+    ) {
+        Column(modifier = Modifier.padding(18.dp)) {
+            Text(
+                text = "Update your kanji name",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+            OutlinedTextField(
+                value = englishName,
+                onValueChange = { englishName = it },
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("English name") },
+                singleLine = true
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+            Text(
+                text = "${preview.kanjiName}  •  ${preview.kanjiMeaning}",
+                color = MaterialTheme.colorScheme.primary,
+                style = MaterialTheme.typography.bodyLarge
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Button(onClick = { onSave(englishName.ifBlank { "Friend" }) }) {
+                    Text("Save")
+                }
+                Button(onClick = onCancel) {
+                    Text("Cancel")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun FirstLaunchOnboarding(
+    onComplete: (String) -> Unit
+) {
+    var englishName by rememberSaveable { mutableStateOf("") }
+    var previewProfile by remember(englishName) {
+        mutableStateOf(UserProfileRepository.generateKanjiProfile(englishName.ifBlank { "Friend" }))
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(24.dp),
+        verticalArrangement = Arrangement.Center
+    ) {
+        Text(
+            text = "Choose your kanji name",
+            style = MaterialTheme.typography.headlineMedium,
+            fontWeight = FontWeight.Bold
+        )
+        Spacer(modifier = Modifier.height(10.dp))
+        Text(
+            text = "On your first visit, we'll generate a kanji-style meaning name from your English name and use it around the app.",
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(modifier = Modifier.height(18.dp))
+        OutlinedTextField(
+            value = englishName,
+            onValueChange = {
+                englishName = it
+                previewProfile = UserProfileRepository.generateKanjiProfile(it.ifBlank { "Friend" })
+            },
+            modifier = Modifier.fillMaxWidth(),
+            label = { Text("Your English name") },
+            singleLine = true
+        )
+        Spacer(modifier = Modifier.height(18.dp))
+        Surface(
+            shape = RoundedCornerShape(24.dp),
+            color = MaterialTheme.colorScheme.surface
+        ) {
+            Column(modifier = Modifier.padding(18.dp)) {
+                Text(
+                    text = previewProfile.kanjiName,
+                    fontSize = 42.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Text("Meaning: ${previewProfile.kanjiMeaning}")
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "This is a friendly kanji-style alias, not a strict real-world name translation.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+        }
+        Spacer(modifier = Modifier.height(18.dp))
+        Button(onClick = { onComplete(englishName.ifBlank { "Friend" }) }) {
+            Text("Start learning")
         }
     }
 }
@@ -514,7 +697,248 @@ private fun DictationPracticeScreen(
 }
 
 @Composable
+private fun TracingLessonScreen(
+    profile: UserProfile,
+    lessons: List<TraceLesson>,
+    onFocusLesson: (TraceLesson) -> Unit
+) {
+    var selectedIndex by rememberSaveable { mutableIntStateOf(0) }
+    val lesson = lessons[selectedIndex]
+
+    LaunchedEffect(selectedIndex) {
+        onFocusLesson(lesson)
+    }
+
+    LazyColumn(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 20.dp),
+        contentPadding = PaddingValues(vertical = 20.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        item {
+            SpeechBubbleTip(text = "${profile.kanjiName}, trace the shape a few times, say the reading out loud, then move to the next character.")
+        }
+        item {
+            Text(
+                text = "${lesson.type} tracing",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary
+            )
+        }
+        item {
+            Text(
+                text = lesson.character,
+                fontSize = 72.sp,
+                fontWeight = FontWeight.Bold
+            )
+        }
+        item {
+            Text(
+                text = "Reading: ${lesson.reading}  |  Meaning: ${lesson.meaning}",
+                style = MaterialTheme.typography.bodyLarge
+            )
+        }
+        item {
+            SpeechBubbleTip(text = lesson.strokeHint)
+        }
+        item {
+            TracingCanvas(
+                character = lesson.character,
+                guides = lesson.guides
+            )
+        }
+        item {
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Button(onClick = {
+                    selectedIndex = if (selectedIndex == 0) lessons.lastIndex else selectedIndex - 1
+                }) {
+                    Text("Previous")
+                }
+                Button(onClick = {
+                    selectedIndex = (selectedIndex + 1) % lessons.size
+                }) {
+                    Text("Next")
+                }
+            }
+        }
+        item { HorizontalDivider() }
+        item {
+            Text(
+                text = "Starter tracing lessons",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold
+            )
+        }
+        itemsIndexed(lessons) { index, traceLesson ->
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { selectedIndex = index },
+                shape = RoundedCornerShape(18.dp),
+                color = if (index == selectedIndex) {
+                    MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
+                } else {
+                    MaterialTheme.colorScheme.surface
+                }
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = traceLesson.character,
+                        fontSize = 30.sp,
+                        modifier = Modifier.width(40.dp)
+                    )
+                    Spacer(modifier = Modifier.size(12.dp))
+                    Column {
+                        Text("${traceLesson.type}: ${traceLesson.reading}", fontWeight = FontWeight.Medium)
+                        Text(
+                            text = traceLesson.meaning,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TracingCanvas(
+    character: String,
+    guides: List<StrokeGuide>
+) {
+    val strokes = remember(character) { mutableStateListOf<List<Offset>>() }
+    val currentStroke = remember(character) { mutableStateListOf<Offset>() }
+    val primaryColor = MaterialTheme.colorScheme.primary
+    val secondaryColor = MaterialTheme.colorScheme.secondary
+    val guideColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)
+
+    Surface(
+        shape = RoundedCornerShape(28.dp),
+        color = MaterialTheme.colorScheme.surface
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(320.dp)
+                    .clip(RoundedCornerShape(24.dp))
+                    .background(Color(0xFFF7F2EB))
+            ) {
+                Canvas(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .pointerInput(character) {
+                            detectDragGestures(
+                                onDragStart = { offset ->
+                                    currentStroke.clear()
+                                    currentStroke.add(offset)
+                                },
+                                onDragEnd = {
+                                    if (currentStroke.isNotEmpty()) {
+                                        strokes.add(currentStroke.toList())
+                                        currentStroke.clear()
+                                    }
+                                }
+                            ) { change, _ ->
+                                change.consume()
+                                val nextPoint = change.position
+                                currentStroke.add(nextPoint)
+                            }
+                        }
+                ) {
+                    drawIntoCanvas { canvas ->
+                        canvas.nativeCanvas.drawText(
+                            character,
+                            size.width / 2f,
+                            size.height / 2f + 48f,
+                            android.graphics.Paint().apply {
+                                textAlign = android.graphics.Paint.Align.CENTER
+                                textSize = 180f
+                                color = android.graphics.Color.argb(40, 80, 80, 80)
+                            }
+                        )
+                    }
+
+                    guides.forEachIndexed { index, guide ->
+                        val start = Offset(size.width * guide.startX, size.height * guide.startY)
+                        val end = Offset(size.width * guide.endX, size.height * guide.endY)
+                        drawLine(
+                            color = guideColor,
+                            start = start,
+                            end = end,
+                            strokeWidth = 8f,
+                            cap = StrokeCap.Round
+                        )
+                        drawIntoCanvas { canvas ->
+                            canvas.nativeCanvas.drawText(
+                                "${index + 1}",
+                                start.x + 8f,
+                                start.y - 8f,
+                                android.graphics.Paint().apply {
+                                    textAlign = android.graphics.Paint.Align.LEFT
+                                    textSize = 34f
+                                    color = android.graphics.Color.argb(180, 175, 62, 45)
+                                    isFakeBoldText = true
+                                }
+                            )
+                        }
+                    }
+
+                    strokes.forEach { points ->
+                        if (points.size > 1) {
+                            val path = Path().apply {
+                                moveTo(points.first().x, points.first().y)
+                                points.drop(1).forEach { lineTo(it.x, it.y) }
+                            }
+                            drawPath(
+                                path = path,
+                                color = primaryColor,
+                                style = Stroke(width = 12f, cap = StrokeCap.Round)
+                            )
+                        }
+                    }
+
+                    if (currentStroke.size > 1) {
+                        val path = Path().apply {
+                            moveTo(currentStroke.first().x, currentStroke.first().y)
+                            currentStroke.drop(1).forEach { lineTo(it.x, it.y) }
+                        }
+                        drawPath(
+                            path = path,
+                            color = secondaryColor,
+                            style = Stroke(width = 12f, cap = StrokeCap.Round)
+                        )
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.height(12.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Button(onClick = {
+                    strokes.clear()
+                    currentStroke.clear()
+                }) {
+                    Text("Clear")
+                }
+                Text(
+                    text = "Trace over the faded guide to build muscle memory.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun DraggableWikiBuddy(
+    profile: UserProfile,
     suggestedQuery: String,
     suggestedLabel: String,
     containerWidthDp: Float,
@@ -554,9 +978,13 @@ private fun DraggableWikiBuddy(
             .padding(16.dp)
     ) {
         if (minimized) {
-            MiniWikiBuddy(onExpand = { minimized = false })
+            MiniWikiBuddy(
+                kanjiName = profile.kanjiName,
+                onExpand = { minimized = false }
+            )
         } else {
             WikiBuddyWidget(
+                profile = profile,
                 suggestedQuery = suggestedQuery,
                 suggestedLabel = suggestedLabel,
                 onMinimize = { minimized = true }
@@ -567,6 +995,7 @@ private fun DraggableWikiBuddy(
 
 @Composable
 private fun MiniWikiBuddy(
+    kanjiName: String,
     onExpand: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -591,13 +1020,15 @@ private fun MiniWikiBuddy(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                text = "\uD83D\uDCCE",
+                text = "\u53cb",
                 fontSize = 20.sp,
-                modifier = Modifier.graphicsLayer { translationY = floatOffset }
+                modifier = Modifier.graphicsLayer { translationY = floatOffset },
+                color = MaterialTheme.colorScheme.onPrimary,
+                fontWeight = FontWeight.Bold
             )
             Spacer(modifier = Modifier.size(8.dp))
             Text(
-                text = "WikiBuddy",
+                text = kanjiName,
                 color = MaterialTheme.colorScheme.onPrimary,
                 fontWeight = FontWeight.Bold
             )
@@ -607,6 +1038,7 @@ private fun MiniWikiBuddy(
 
 @Composable
 private fun WikiBuddyWidget(
+    profile: UserProfile,
     suggestedQuery: String,
     suggestedLabel: String,
     onMinimize: () -> Unit
@@ -658,16 +1090,21 @@ private fun WikiBuddyWidget(
                         .background(MaterialTheme.colorScheme.primary),
                     contentAlignment = Alignment.Center
                 ) {
-                    Text(text = "\uD83D\uDCCE", fontSize = 24.sp)
+                    Text(
+                        text = "\u53cb",
+                        fontSize = 24.sp,
+                        color = MaterialTheme.colorScheme.onPrimary,
+                        fontWeight = FontWeight.Bold
+                    )
                 }
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "WikiBuddy",
+                        text = "WikiBuddy for ${profile.kanjiName}",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        text = "Need a quick hint for \"$suggestedLabel\"? I can ask Wiktionary.",
+                        text = "${profile.kanjiName}, need a quick hint for \"$suggestedLabel\"? I can ask Wiktionary.",
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
